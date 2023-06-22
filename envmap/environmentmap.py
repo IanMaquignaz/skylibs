@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from tqdm import tqdm
 import numpy as np
+import cv2
 from scipy.ndimage import map_coordinates, zoom
 from skimage.transform import resize_local_mean, downscale_local_mean
 
@@ -14,6 +15,7 @@ from .projections import *
 from .xmlhelper import EnvmapXMLParser
 from .rotations import rotx, roty, rotz
 
+from jax.scipy import ndimage as jndimage
 
 SUPPORTED_FORMATS = [
     'angular',
@@ -95,6 +97,60 @@ class EnvironmentMap:
         self.backgroundColor = np.zeros(self.data.shape[-1])
         self.validate()
 
+
+    def __call__(self, im, format_=None, copy=True, channels=3):
+        """
+        Creates an EnvironmentMap.
+
+        :param im: Image path (str, pathlib.Path) or data (np.ndarray) representing 
+                   an EnvironmentMap, or the height (int) of an empty EnvironmentMap.
+        :param format_: EnvironmentMap format. Can be any from SUPPORTED_FORMATS.
+        :param copy: When a numpy array is given, should it be copied.
+        :param channels: Number of channels (e.g., 1=grayscale, 3=color).
+
+        :type im: str, Path, int, np.ndarray
+        :type format_: str
+        :type copy: bool
+        """
+        if not format_ and isPath(im):
+            filename = os.path.splitext(str(im))[0]
+            metadata = EnvmapXMLParser("{}.meta.xml".format(filename))
+            format_ = metadata.getFormat()
+
+        assert format_ is not None, (
+            "Please provide format (metadata file not found).")
+        assert format_.lower() in SUPPORTED_FORMATS, (
+            "Unknown format: {}".format(format_))
+
+        self.format_ = format_.lower()
+
+        if isPath(im):
+            # We received the filename
+            self.data = imread(str(im))
+        elif isinstance(im, int):
+            # We received a single scalar
+            if self.format_ == 'latlong':
+                self.data = np.zeros((im, im*2, channels))
+            elif self.format_ == 'skylatlong':
+                self.data = np.zeros((im, im*4, channels))
+            elif self.format_ == 'cube':
+                self.data = np.zeros((im, round(3/4*im), channels))
+            else:
+                self.data = np.zeros((im, im, channels))
+        elif type(im).__module__ == np.__name__:
+            # We received a numpy array
+            self.data = np.asarray(im, dtype='double')
+
+            if copy:
+                self.data = self.data.copy()
+        else:
+            raise Exception('Could not understand input. Please provide a '
+                            'filename (str), an height (integer) or an image '
+                            '(np.ndarray).')
+
+        self.validate()
+        return self
+    
     def validate(self):
         # Ensure the envmap is valid
         if self.format_ in ['sphere', 'angular', 'skysphere', 'skyangular']:
@@ -146,7 +202,8 @@ class EnvironmentMap:
 
 
     @classmethod
-    def from_omnicam(cls, im, targetDim, targetFormat='skyangular', OcamCalib_=None, copy=True, order=1):
+    def from_omnicam(cls, im, targetDim, targetFormat='skyangular', OcamCalib_=None,
+                     copy=True, order=1, cache=False, mode=None):
         """
         Creates an EnvironmentMap from Omnidirectional Camera (OcamCalib) capture.
 
@@ -188,40 +245,132 @@ class EnvironmentMap:
             raise Exception('Could not understand input. Please provide a '
                             'filename (str) or an image (np.ndarray).')
 
+        # Define environment map
         e = EnvironmentMap(targetDim, targetFormat)
+
+        # Compute transformation
         dx, dy, dz, valid = e.worldCoordinates()
         u,v = world2ocam(dx, dy, dz, OcamCalib_)
 
+        # Init cache keys
+        hashes=None
+        if cache:
+            hash_self = hash((hash(e), str(OcamCalib_)))
+            hash_target = hash((targetDim, targetFormat.lower()))
+            hashes = (hash_self, hash_target)
+
         # Interpolate
-        # Repeat the first and last rows/columns for interpolation purposes
-        h, w, d = data.shape
-        source = np.empty((h + 2, w + 2, d))
-
-        source[1:-1, 1:-1] = data
-        source[0,1:-1] = data[0,:]; source[0,0] = data[0,0]; source[0,-1] = data[0,-1]
-        source[-1,1:-1] = data[-1,:]; source[-1,0] = data[-1,0]; source[-1,-1] = data[-1,-1]
-        source[1:-1,0] = data[:,0]
-        source[1:-1,-1] = data[:,-1]
-
-        # To avoid displacement due to the padding
-        u += 0.5/data.shape[1]
-        v += 0.5/data.shape[0]
-        target = np.vstack((u.flatten()*data.shape[0], v.flatten()*data.shape[1]))
-
-        data = np.zeros((u.shape[0], u.shape[1], d))
-        for c in range(d):
-            map_coordinates(source[:,:,c], target, output=data[:,:,c].reshape(-1), cval=np.nan, order=order, prefilter=filter)
         e.data = data
+        e.interpolate(u, v, valid, order, cache=cache, mode=mode, hashes=hashes)
 
         # Done
         return e
 
 
-    def __hash__(self):
-        """Provide a hash of the environment map type and size.
-        Warning: doesn't take into account the data, just the type,
+    def convert_omnicam(self, im, targetDim, targetFormat='skyangular', OcamCalib_=None,
+                     copy=True, order=1, cache=False, mode=None):
+        """
+        Creates an EnvironmentMap from Omnidirectional Camera (OcamCalib) capture.
+        Differs from classmethod from_omnicam(...) by modifying the current instance.
+        This method enables caching of transformation for a speedup.
+
+        :param im: Image path (str, pathlib.Path) or data (np.ndarray) representing 
+                an ocam image.
+        :param OcamCalib: OCamCalib calibration dictionary. If not provided and 
+                param im is an image path, then calibration will be loaded directly 
+                from matching ".meta.xml" file.
+        :param targetFormat: Target format.
+        :param targetDim: Target dimension.
+        :param order: Interpolation order (0: nearest, 1: linear, ..., 5).
+        :param copy: When a numpy array is given, should it be copied.
+
+        :type im: str, Path, np.ndarray
+        :type OcamCalib: dict
+        :type targetFormat: string
+        :type targetDim: integer
+        :type order: integer (0,1,...,5)
+        :type copy: bool
+        """
+
+        if not OcamCalib_ and isPath(im):
+            filename = os.path.splitext(str(im))[0]
+            metadata = EnvmapXMLParser("{}.meta.xml".format(filename))
+            OcamCalib_ = metadata.get_calibration()
+
+        assert OcamCalib_ is not None, (
+            "Please provide OCam (metadata file not found).")
+
+        if isPath(im):
+            # We received the filename
+            data = imread(str(im))
+        elif type(im).__module__ == np.__name__:
+            # We received a numpy array
+            data = np.asarray(im, dtype='double')
+            if copy:
+                data = data.copy()
+        else:
+            raise Exception('Could not understand input. Please provide a '
+                            'filename (str) or an image (np.ndarray).')
+
+        # Check if interpolation cache exits
+        hashes=None
+        if cache and hasattr(self, '_interpolationCache'):
+
+            # Check if desired transformation is in the cache
+            hash_self = hash((hash(self), str(OcamCalib_)))
+            hash_target = hash((targetDim, targetFormat.lower()))
+            hashes = (hash_self, hash_target)
+            if hash_self in self._interpolationCache \
+                and mode in self._interpolationCache[hash_self] \
+                and hash_target in self._interpolationCache[hash_self][mode]:
+
+                # Use cached transformation
+                u = self._interpolationCache[hash_self][mode][hash_target]['u']
+                v = self._interpolationCache[hash_self][mode][hash_target]['v']
+                valid = self._interpolationCache[hash_self][mode][hash_target]['valid']
+
+                # Interpolate
+                self.data = data
+                self.format_ = targetFormat.lower()
+                self.interpolate(u, v, valid, order, cache=cache, mode=mode)
+                
+                return self
+
+        # Compute world coordinates
+        eTmp = EnvironmentMap(targetDim, targetFormat)
+        dx, dy, dz, valid = eTmp.worldCoordinates()
+        u,v = world2ocam(dx, dy, dz, OcamCalib_)
+
+        # Interpolate
+        self.data = data
+        self.format_ = targetFormat.lower()
+        self.interpolate(u, v, valid, order, cache=cache, mode=mode, hashes=hashes)
+
+        # Done
+        return self
+
+
+    def __key(self):
+        """Provides a 'key' which identifies an environment map.
+        Warning: Doesn't take into account the data, just the type,
                  and the size (useful for soldAngles)."""
-        return hash((self.data.shape, self.format_))
+        return (self.data.shape, self.format_)
+
+
+    def __hash__(self):
+        """Provides a hash of the environment map type and size.
+        Warning: Doesn't take into account the data, just the type,
+                 and the size (useful for soldAngles)."""
+        return hash(self.__key())
+
+
+    def __eq__(self, other):
+        """Check equality between environment maps.
+        Warning: Doesn't take into account the data, just the type,
+                 and the size (useful for soldAngles)."""
+        if isinstance(other, EnvironmentMap):
+            return self.__key() == other.__key()
+
 
     def copy(self):
         """Returns a copy of the current environment map."""
@@ -323,7 +472,9 @@ class EnvironmentMap:
 
         return x, y, z, v
 
-    def interpolate(self, u, v, valid=None, order=1, filter=True):
+    
+    def interpolate(self, u, v, valid=None, order=1, filter=True,
+                    cache=False, mode='sequential', hashes=None):
         """
         Interpolate to get the desired pixel values.
 
@@ -344,20 +495,91 @@ class EnvironmentMap:
         source[1:-1,0] = self.data[:,0]
         source[1:-1,-1] = self.data[:,-1]
 
-        # To avoid displacement due to the padding
-        u += 0.5/self.data.shape[1]
-        v += 0.5/self.data.shape[0]
-        target = np.vstack((v.flatten()*self.data.shape[0], u.flatten()*self.data.shape[1]))
+        def preprocess(u,v):
+            # To avoid displacement due to the padding
+            u += 0.5/self.data.shape[1]
+            v += 0.5/self.data.shape[0]
+            u = (u*self.data.shape[1])
+            v = (v*self.data.shape[0])
+            if mode == 'fast':
+                u, v = cv2.convertMaps(
+                    u.astype(np.float32), v.astype(np.float32),
+                    dstmap1type=cv2.CV_16SC2,
+                    nninterpolation=False if order!=0 else True
+                )
+            return u,v
 
-        data = np.zeros((u.shape[0], u.shape[1], d))
-        for c in range(d):
-            map_coordinates(source[:,:,c], target, output=data[:,:,c].reshape(-1), cval=np.nan, order=order, prefilter=filter)
-        self.data = data
+        # Cache interpolation
+        if cache:
+            # Create cache if it does not exist
+            if not hasattr(self, '_interpolationCache'):
+                self._interpolationCache = {}
+
+            if hashes is not None:
+                u,v=preprocess(self,u,v)
+                # Add transform to cache
+                hash_self, hash_target = hashes
+                self._interpolationCache[hash_self] = \
+                {
+                    mode: {
+                        hash_target: {
+                            'u': u,
+                            'v': v,
+                            'valid': valid,
+                            'mode': mode,
+                        }
+                    }
+                }
+        else:
+            u,v=preprocess(u,v)
+
+
+        output = np.zeros((u.shape[0], u.shape[1],d))
+        if mode == 'fast':
+            match order:
+                case 0:
+                        cv2.remap(
+                        src=source,
+                        dst=output,
+                        map1=u,
+                        map2=v,
+                        interpolation=cv2.INTER_NEAREST,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0)
+                case 1:
+                        cv2.remap(
+                        src=source,
+                        dst=output,
+                        map1=u,
+                        map2=v,
+                        interpolation=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0)
+                case _:
+                    raise NotImplementedError
+            self.data = output
+        elif mode == 'parallel':
+            target = [ v.flatten(), u.flatten() ]
+            for c in range(d):
+                output[:,:,c] = jndimage.map_coordinates(
+                        input=source[:,:,c],
+                        coordinates=target,
+                        order=order,
+                        mode='constant',
+                        cval=np.nan
+                    ).reshape(output.shape[:2])
+            self.data = output
+        else: # Sequential
+            target = [ v.flatten(), u.flatten() ]
+            for c in range(d):
+                map_coordinates(source[:,:,c], target, output=output[:,:,c].reshape(-1), cval=np.nan, order=order, prefilter=filter)
+            self.data = output
 
         if valid is not None:
             self.setBackgroundColor(self.backgroundColor, valid)
 
         return self
+
 
     def setBackgroundColor(self, color, valid=None):
         """Sets the area defined by ~valid to color."""
@@ -379,7 +601,8 @@ class EnvironmentMap:
 
         return self
 
-    def convertTo(self, targetFormat, targetDim=None, order=1):
+
+    def convertTo(self, targetFormat, targetDim=None, order=1, cache=False, mode=None):
         """
         Convert to another format.
 
@@ -400,11 +623,36 @@ class EnvironmentMap:
             # By default, number of rows
             targetDim = self.data.shape[0]
 
+        # Check if interpolation cache exits
+        hashes=None
+        if cache and hasattr(self, '_interpolationCache'):
+
+            # Check if desired transformation is in the cache
+            hash_self = hash(self)
+            hash_target = hash((targetDim, targetFormat.lower()))
+            if hash_self in self._interpolationCache \
+                and mode in self._interpolationCache[hash_self] \
+                and hash_target in self._interpolationCache[hash_self][mode]:
+
+                # Use cached transformation
+                u = self._interpolationCache[hash_self][mode][hash_target]['u']
+                v = self._interpolationCache[hash_self][mode][hash_target]['v']
+                valid = self._interpolationCache[hash_self][mode][hash_target]['valid']
+
+                # Interpolate
+                self.interpolate(u, v, valid, order, cache=cache, mode=mode)
+                self.format_ = targetFormat.lower()
+                return self
+            hashes = (hash_self, hash_target)
+
+        # Compute world coordinates
         eTmp = EnvironmentMap(targetDim, targetFormat)
         dx, dy, dz, valid = eTmp.worldCoordinates()
         u, v = self.world2image(dx, dy, dz)
         self.format_ = targetFormat.lower()
-        self.interpolate(u, v, valid, order)
+
+        # Interpolate
+        self.interpolate(u, v, valid, order, cache=cache, mode=mode, hashes=hashes)
 
         return self
 
@@ -471,7 +719,7 @@ class EnvironmentMap:
                     print("integer resize")
                 fac = self.data.shape[0] // targetSize[0]
                 self.data = downscale_local_mean(self.data, (fac, fac, 1))
-            else:    
+            else:
                 if debug is True:
                     print("non-integer resize")
                 self.data = resize_local_mean(self.data, targetSize, grid_mode=True, preserve_range=True)
