@@ -536,27 +536,28 @@ class EnvironmentMap:
 
         output = np.zeros((u.shape[0], u.shape[1],d))
         if mode == 'fast':
-            match order:
-                case 0:
-                        cv2.remap(
-                        src=source,
-                        dst=output,
-                        map1=u,
-                        map2=v,
-                        interpolation=cv2.INTER_NEAREST,
-                        borderMode=cv2.BORDER_CONSTANT,
-                        borderValue=0)
-                case 1:
-                        cv2.remap(
-                        src=source,
-                        dst=output,
-                        map1=u,
-                        map2=v,
-                        interpolation=cv2.INTER_LINEAR,
-                        borderMode=cv2.BORDER_CONSTANT,
-                        borderValue=0)
-                case _:
-                    raise NotImplementedError
+            if order == 0:
+                cv2.remap(
+                    src=source,
+                    dst=output,
+                    map1=u,
+                    map2=v,
+                    interpolation=cv2.INTER_NEAREST,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0
+                )
+            elif order == 1: 
+                cv2.remap(
+                    src=source,
+                    dst=output,
+                    map1=u,
+                    map2=v,
+                    interpolation=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0
+                )
+            else:
+                raise NotImplementedError
             self.data = output
         elif mode == 'parallel':
             target = [ v.flatten(), u.flatten() ]
