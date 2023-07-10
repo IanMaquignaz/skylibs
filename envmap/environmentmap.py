@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from tqdm import tqdm
 import numpy as np
+import jax.numpy as jnp
 import cv2
 from scipy.ndimage import map_coordinates, zoom
 from skimage.transform import resize_local_mean, downscale_local_mean
@@ -97,6 +98,38 @@ class EnvironmentMap:
         self.backgroundColor = np.zeros(self.data.shape[-1])
         self.validate()
 
+    def interpret_input(self, im, copy, channels=3):
+        ''' Parse input '''
+        print(type(im))
+        if isPath(im):
+            # We received the filename
+            self.data = imread(str(im))
+        elif isinstance(im, int):
+            # We received a single scalar
+            if self.format_ == 'latlong':
+                self.data = np.zeros((im, im*2, channels))
+            elif self.format_ == 'skylatlong':
+                self.data = np.zeros((im, im*4, channels))
+            elif self.format_ == 'cube':
+                self.data = np.zeros((im, round(3/4*im), channels))
+            else:
+                self.data = np.zeros((im, im, channels))
+        elif isinstance(im, np.ndarray):
+            # We received a numpy array
+            self.data = np.asarray(im, dtype='double')
+
+            if copy:
+                self.data = self.data.copy()
+        elif isinstance(im, jnp.ndarray):
+            # We received a numpy array
+            self.data = jnp.asarray(im, dtype='double')
+
+            if copy:
+                self.data = self.data.copy()
+        else:
+            raise Exception('Could not understand input. Please provide a '
+                            'filename (str), an height (integer) or an image '
+                            '(np.ndarray).')
 
     def __call__(self, im, format_=None, copy=True, channels=3):
         """
@@ -123,31 +156,7 @@ class EnvironmentMap:
             "Unknown format: {}".format(format_))
 
         self.format_ = format_.lower()
-
-        if isPath(im):
-            # We received the filename
-            self.data = imread(str(im))
-        elif isinstance(im, int):
-            # We received a single scalar
-            if self.format_ == 'latlong':
-                self.data = np.zeros((im, im*2, channels))
-            elif self.format_ == 'skylatlong':
-                self.data = np.zeros((im, im*4, channels))
-            elif self.format_ == 'cube':
-                self.data = np.zeros((im, round(3/4*im), channels))
-            else:
-                self.data = np.zeros((im, im, channels))
-        elif type(im).__module__ == np.__name__:
-            # We received a numpy array
-            self.data = np.asarray(im, dtype='double')
-
-            if copy:
-                self.data = self.data.copy()
-        else:
-            raise Exception('Could not understand input. Please provide a '
-                            'filename (str), an height (integer) or an image '
-                            '(np.ndarray).')
-
+        self.interpret_input(im, copy, channels)
         self.validate()
         return self
     
@@ -233,17 +242,8 @@ class EnvironmentMap:
         assert OcamCalib_ is not None, (
             "Please provide OCam (metadata file not found).")
 
-        if isPath(im):
-            # We received the filename
-            data = imread(str(im))
-        elif type(im).__module__ == np.__name__:
-            # We received a numpy array
-            data = np.asarray(im, dtype='double')
-            if copy:
-                data = data.copy()
-        else:
-            raise Exception('Could not understand input. Please provide a '
-                            'filename (str) or an image (np.ndarray).')
+        assert not isinstance(im, int), (
+            "Please provide a valid image path or data (np.ndarray).")
 
         # Define environment map
         e = EnvironmentMap(targetDim, targetFormat)
@@ -260,7 +260,7 @@ class EnvironmentMap:
             hashes = (hash_self, hash_target)
 
         # Interpolate
-        e.data = data
+        e.interpret_input(im, copy)
         e.interpolate(u, v, valid, order, cache=cache, mode=mode, hashes=hashes)
 
         # Done
@@ -300,18 +300,10 @@ class EnvironmentMap:
         assert OcamCalib_ is not None, (
             "Please provide OCam (metadata file not found).")
 
-        if isPath(im):
-            # We received the filename
-            data = imread(str(im))
-        elif type(im).__module__ == np.__name__:
-            # We received a numpy array
-            data = np.asarray(im, dtype='double')
-            if copy:
-                data = data.copy()
-        else:
-            raise Exception('Could not understand input. Please provide a '
-                            'filename (str) or an image (np.ndarray).')
-
+        assert not isinstance(im, int), (
+            "Please provide a valid image path or data (np.ndarray).")
+        self.interpret_input(im, copy)
+        
         # Check if interpolation cache exits
         hashes=None
         if cache and hasattr(self, '_interpolationCache'):
@@ -330,7 +322,6 @@ class EnvironmentMap:
                 valid = self._interpolationCache[hash_self][mode][hash_target]['valid']
 
                 # Interpolate
-                self.data = data
                 self.format_ = targetFormat.lower()
                 self.interpolate(u, v, valid, order, cache=cache, mode=mode)
                 
@@ -342,7 +333,6 @@ class EnvironmentMap:
         u,v = world2ocam(dx, dy, dz, OcamCalib_)
 
         # Interpolate
-        self.data = data
         self.format_ = targetFormat.lower()
         self.interpolate(u, v, valid, order, cache=cache, mode=mode, hashes=hashes)
 
@@ -516,7 +506,7 @@ class EnvironmentMap:
                 self._interpolationCache = {}
 
             if hashes is not None:
-                u,v=preprocess(self,u,v)
+                u,v=preprocess(u,v)
                 # Add transform to cache
                 hash_self, hash_target = hashes
                 self._interpolationCache[hash_self] = \
