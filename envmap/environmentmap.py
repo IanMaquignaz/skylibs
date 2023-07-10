@@ -5,7 +5,10 @@ from decimal import Decimal
 
 from tqdm import tqdm
 import numpy as np
+
+os.environ['JAX_ENABLE_X64'] = '1'
 import jax.numpy as jnp
+
 import cv2
 from scipy.ndimage import map_coordinates, zoom
 from skimage.transform import resize_local_mean, downscale_local_mean
