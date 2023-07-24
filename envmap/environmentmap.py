@@ -103,7 +103,7 @@ class EnvironmentMap:
 
     def interpret_input(self, im, copy, channels=3):
         ''' Parse input '''
-        print(type(im))
+
         if isPath(im):
             # We received the filename
             self.data = imread(str(im))
