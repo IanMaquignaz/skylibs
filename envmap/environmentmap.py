@@ -237,6 +237,24 @@ class EnvironmentMap:
 
         return u, v
 
+    def image2pixel(self, u, v):
+        """Returns the (u, v) coordinates (in the interval defined by the MxN image)."""
+
+        # de-Normalize coordinates to interval defined by the MxN image
+        u = np.floor(u*self.data.shape[1]).astype(int)
+        v = np.floor(v*self.data.shape[0]).astype(int)
+
+        return u, v
+
+    def pixel2image(self, u, v):
+        """Returns the (u, v) coordinates (in the [-1, 1] interval)."""
+
+        # Normalize coordinates to [-1, 1] interval
+        u = (u+0.5) / self.data.shape[1]
+        v = (v+0.5) / self.data.shape[0]
+
+        return u, v
+
 
     def pixel2world(self, u, v):
         """Returns the (x, y, z) coordinates for pixel cordinates (u,v)(in the interval defined by the MxN image)."""
