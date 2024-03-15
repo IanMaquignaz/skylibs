@@ -136,3 +136,42 @@ def sunPosition_pySolar_XYZ(latitude, longitude, time, elevation=0):
     # Convert to world coordinates
     x, y, z, _ = latlong2world(u, v)
     return x, y, z
+
+
+def azimuthZenith2world(
+    azimuth,
+    zenith=None,
+    elevation=None
+):
+    '''
+    Converts coordinates azimuth (in radians), zenith (in radians) and
+    returns a tuple containing the (x, y, z) world coordinate.
+    
+    Note, elevation (in radians) can substitute zenith.
+    zenith angle = 90degrees - elevation angle
+
+    Note, azimuth angles can be inconsistent in orientation.
+    North-based azimuth angles require offset (+90deg) and inversion (*-1) to measure clockwise.
+    '''
+    
+    Note, the validity (v) of the coordinate is not returned. 
+    Please check the coordinate in respect to your environment map.
+    '''
+    
+    # Convert Zenith to elevation
+    # zenith angle = 90degrees - elevation angle
+    if zenith is not None:
+        elevation = (np.pi/2) - zenith
+    else:
+        assert elevation is not None
+
+    # Fix azimuth orientation
+    azimuth = azimuth - (np.pi/2)
+
+    # Convert to XYZ
+    x = np.cos(elevation) * np.sin(azimuth)
+    y = np.sin(elevation) # Y axis is up
+    z = np.cos(elevation) * np.cos(azimuth)
+
+    # Done
+    return x,y,z
